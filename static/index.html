@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Airport Distance Calculator</title>
+    <!-- Vue.js -->
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        .search-container {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            right: 20px;
+            z-index: 1000;
+            display: flex;
+            gap: 20px;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .search-box {
+            flex: 1;
+            position: relative;
+        }
+        .search-input {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 16px;
+        }
+        .suggestions {
+            position: absolute;
+            top: 100%;
+            left: 0;
+            right: 0;
+            background: white;
+            border: 1px solid #ddd;
+            border-top: none;
+            max-height: 200px;
+            overflow-y: auto;
+            z-index: 1000;
+        }
+        .suggestion-item {
+            padding: 8px 10px;
+            cursor: pointer;
+        }
+        .suggestion-item:hover {
+            background-color: #f0f0f0;
+        }
+        #map {
+            flex: 1;
+            width: 100%;
+            height: 100vh;
+        }
+        .results {
+            position: fixed;
+            bottom: 20px;
+            left: 20px;
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            z-index: 1000;
+        }
+        .results h3 {
+            margin-top: 0;
+            margin-bottom: 10px;
+        }
+        .speed-input {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-top: 10px;
+        }
+        .speed-input input {
+            width: 80px;
+            padding: 5px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <div class="search-container">
+            <div class="search-box">
+                <input 
+                    type="text" 
+                    class="search-input" 
+                    v-model="originSearch" 
+                    @input="searchAirports('origin')"
+                    placeholder="Enter origin airport..."
+                >
+                <div class="suggestions" v-if="originSuggestions.length > 0">
+                    <div 
+                        v-for="airport in originSuggestions" 
+                        :key="airport.id"
+                        class="suggestion-item"
+                        @click="selectAirport('origin', airport)"
+                    >
+                        {{ airport.name }} ({{ airport.iata_code || airport.icao_code || airport.ident }})
+                    </div>
+                </div>
+            </div>
+
+            <div class="search-box">
+                <input 
+                    type="text" 
+                    class="search-input" 
+                    v-model="destinationSearch" 
+                    @input="searchAirports('destination')"
+                    placeholder="Enter destination airport..."
+                >
+                <div class="suggestions" v-if="destinationSuggestions.length > 0">
+                    <div 
+                        v-for="airport in destinationSuggestions" 
+                        :key="airport.id"
+                        class="suggestion-item"
+                        @click="selectAirport('destination', airport)"
+                    >
+                        {{ airport.name }} ({{ airport.iata_code || airport.icao_code || airport.ident }})
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="map"></div>
+
+        <div class="results" v-if="origin && destination">
+            <h3>Flight Information</h3>
+            <p>Distance: {{ distance.toFixed(2) }} nautical miles</p>
+            <div class="speed-input">
+                <label for="speed">Speed:</label>
+                <input 
+                    type="number" 
+                    id="speed" 
+                    v-model.number="speed" 
+                    min="1" 
+                    max="1000"
+                >
+                <span>knots</span>
+            </div>
+            <p>Estimated time: {{ flightTime }}</p>
+        </div>
+    </div>
+
+    <script>
+        const { createApp } = Vue
+
+        createApp({
+            data() {
+                return {
+                    originSearch: '',
+                    destinationSearch: '',
+                    originSuggestions: [],
+                    destinationSuggestions: [],
+                    origin: null,
+                    destination: null,
+                    map: null,
+                    markers: [],
+                    line: null,
+                    speed: 120
+                }
+            },
+            computed: {
+                distance() {
+                    if (!this.origin || !this.destination || 
+                        !this.origin.latitude_deg || !this.origin.longitude_deg ||
+                        !this.destination.latitude_deg || !this.destination.longitude_deg) return 0;
+                    return this.calculateDistance(
+                        this.origin.latitude_deg,
+                        this.origin.longitude_deg,
+                        this.destination.latitude_deg,
+                        this.destination.longitude_deg
+                    );
+                },
+                flightTime() {
+                    if (!this.distance || !this.speed) return '';
+                    const hours = this.distance / this.speed;
+                    const wholeHours = Math.floor(hours);
+                    const minutes = Math.round((hours - wholeHours) * 60);
+                    return `${wholeHours}h ${minutes}m`;
+                }
+            },
+            mounted() {
+                this.initMap();
+            },
+            methods: {
+                initMap() {
+                    this.map = L.map('map').setView([0, 0], 2);
+                    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                        attribution: '© OpenStreetMap contributors'
+                    }).addTo(this.map);
+                },
+                async searchAirports(type) {
+                    const query = type === 'origin' ? this.originSearch : this.destinationSearch;
+                    if (query.length < 2) {
+                        if (type === 'origin') this.originSuggestions = [];
+                        else this.destinationSuggestions = [];
+                        return;
+                    }
+
+                    try {
+                        const response = await fetch(`/search?q=${encodeURIComponent(query)}`);
+                        const airports = await response.json();
+                        if (type === 'origin') {
+                            this.originSuggestions = airports;
+                        } else {
+                            this.destinationSuggestions = airports;
+                        }
+                    } catch (error) {
+                        console.error('Error searching airports:', error);
+                    }
+                },
+                selectAirport(type, airport) {
+                    if (type === 'origin') {
+                        this.origin = airport;
+                        this.originSearch = `${airport.name} (${airport.ident})`;
+                        this.originSuggestions = [];
+                    } else {
+                        this.destination = airport;
+                        this.destinationSearch = `${airport.name} (${airport.ident})`;
+                        this.destinationSuggestions = [];
+                    }
+                    this.updateMap();
+                },
+                updateMap() {
+                    // Clear existing markers and line
+                    this.markers.forEach(marker => marker.remove());
+                    this.markers = [];
+                    if (this.line) this.line.remove();
+
+                    if (this.origin && this.destination && 
+                        this.origin.latitude_deg && this.origin.longitude_deg &&
+                        this.destination.latitude_deg && this.destination.longitude_deg) {
+                        // Add markers
+                        const originMarker = L.marker([this.origin.latitude_deg, this.origin.longitude_deg])
+                            .bindPopup(`Origin: ${this.origin.name}`)
+                            .addTo(this.map);
+                        const destMarker = L.marker([this.destination.latitude_deg, this.destination.longitude_deg])
+                            .bindPopup(`Destination: ${this.destination.name}`)
+                            .addTo(this.map);
+                        
+                        this.markers = [originMarker, destMarker];
+
+                        // Add line
+                        this.line = L.polyline([
+                            [this.origin.latitude_deg, this.origin.longitude_deg],
+                            [this.destination.latitude_deg, this.destination.longitude_deg]
+                        ], {color: 'red'}).addTo(this.map);
+
+                        // Fit map to show both markers
+                        this.map.fitBounds(this.line.getBounds());
+                    }
+                },
+                calculateDistance(lat1, lon1, lat2, lon2) {
+                    const R = 3440.065; // Earth's radius in nautical miles
+                    const dLat = this.toRad(lat2 - lat1);
+                    const dLon = this.toRad(lon2 - lon1);
+                    const a = 
+                        Math.sin(dLat/2) * Math.sin(dLat/2) +
+                        Math.cos(this.toRad(lat1)) * Math.cos(this.toRad(lat2)) * 
+                        Math.sin(dLon/2) * Math.sin(dLon/2);
+                    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+                    return R * c;
+                },
+                toRad(degrees) {
+                    return degrees * (Math.PI / 180);
+                }
+            }
+        }).mount('#app')
+    </script>
+</body>
+</html> 
